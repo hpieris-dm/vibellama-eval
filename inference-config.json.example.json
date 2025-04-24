@@ -1,0 +1,7 @@
+{
+  "model_sizes": [1,3,11],
+  "seeds": [42,123,456,789,555],
+  "model_hub_namespace": "hpieris",
+  "n_reps": 3,
+  "max_new_tokens": 50
+}

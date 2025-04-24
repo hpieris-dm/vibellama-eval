@@ -5,7 +5,7 @@ evaluate_models.py
 Generative inference using SFT-tuned causal Llama models,
 measuring accuracy, performance, and resource usage,
 with the exact same chat-prompt format you used in training.
-Outputs a CSV for statistical analysis.
+Outputs an incremental CSV for statistical analysis.
 """
 
 import os
@@ -18,11 +18,7 @@ import pandas as pd
 import numpy as np
 from tqdm.auto import tqdm
 from datasets import load_dataset
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BitsAndBytesConfig
-)
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from sklearn.metrics import f1_score
 
 def load_config(path="inference-config.json"):
@@ -30,13 +26,10 @@ def load_config(path="inference-config.json"):
         return json.load(f)
 
 def format_inference_prompt(review: str) -> str:
-    """
-    Mirrors the training prompt.
-    """
     system_prompt = "You are a helpful assistant that analyzes the sentiment of provided inputs."
     if len(review) > 1000:
         review = review[:1000] + "..."
-    prompt = (
+    return (
         "<|begin_of_text|><|system|>\n"
         f"{system_prompt}<|end_of_text|>\n"
         "<|user|>\n"
@@ -45,11 +38,9 @@ def format_inference_prompt(review: str) -> str:
         f"Review: {review}<|end_of_text|>\n"
         "<|assistant|>\n"
     )
-    return prompt
 
 def make_model_specs(cfg):
     specs = []
-    # 1) The fine-tuned VibeLlama models (4-bit)
     for size in cfg["model_sizes"]:
         for seed in cfg["seeds"]:
             specs.append({
@@ -58,14 +49,13 @@ def make_model_specs(cfg):
                 "seed": seed,
                 "quant": "4bit"
             })
-
-    # 2) Base Llama models (FP32 & 4-bit), with special 11B name
     for size in cfg["model_sizes"]:
-        if size == 11:
-            base_id = "meta-llama/Llama-3.2-11B-Vision-Instruct"
-        else:
-            base_id = f"meta-llama/Llama-3.2-{size}B-Instruct"
-        specs.append({"model_name": base_id, "size": size, "seed": None, "quant": "fp32"})
+        base_id = (
+            "meta-llama/Llama-3.2-11B-Vision-Instruct"
+            if size == 11 else
+            f"meta-llama/Llama-3.2-{size}B-Instruct"
+        )
+        specs.append({"model_name": base_id, "size": size, "seed": None, "quant": "bf16"})
         specs.append({"model_name": base_id, "size": size, "seed": None, "quant": "4bit"})
     return specs
 
@@ -80,8 +70,15 @@ def load_causal_model(model_name, quant):
         model = AutoModelForCausalLM.from_pretrained(
             model_name, device_map="auto", quantization_config=bnb
         )
+    elif quant == "bf16":
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            device_map="auto",
+            torch_dtype=torch.bfloat16
+        )
     else:
-        model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto")
+        raise ValueError(f"Unknown quant mode: {quant}")
+    
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
     model.eval()
     return model, tokenizer
@@ -100,8 +97,7 @@ def get_sentiment_prediction(model, tokenizer, prompt, max_new_tokens=50):
     t1 = time.perf_counter()
     response = tokenizer.decode(out[0], skip_special_tokens=True)
     mem = torch.cuda.max_memory_reserved(model.device) / 1024**2
-    text = response.lower()
-    lbl = 1 if "positive" in text else 0
+    lbl = 1 if "positive" in response.lower() else 0
     return lbl, t1 - t0, response, mem
 
 def evaluate_one(spec, reviews, labels, cfg):
@@ -110,25 +106,26 @@ def evaluate_one(spec, reviews, labels, cfg):
     rows = []
 
     for rep in range(1, n_reps+1):
-        # Load model + tokenizer
+        # load
         model, tokenizer = load_causal_model(spec["model_name"], spec["quant"])
 
-        # Parameter footprint
+        # param footprint
         param_count = sum(p.numel() for p in model.parameters())
-        param_mem_mb = sum(p.numel()*p.element_size() for p in model.parameters()) / 1024**2
+        param_mem_mb = sum(p.numel()*p.element_size() for p in model.parameters())/1024**2
 
-        # Warm-up on first prompt
-        prompt0 = format_inference_prompt(reviews[0])
-        _ = get_sentiment_prediction(model, tokenizer, prompt0, max_new_tokens)
+        # warm-up
+        _ = get_sentiment_prediction(model, tokenizer, format_inference_prompt(reviews[0]), max_new_tokens)
 
         preds, times, mems = [], [], []
         for review in tqdm(reviews, desc=f"{spec['model_name']} rep{rep}", leave=False):
-            prompt = format_inference_prompt(review)
-            lbl, t, _, m = get_sentiment_prediction(model, tokenizer, prompt, max_new_tokens)
+            lbl, t, _, m = get_sentiment_prediction(
+                model, tokenizer, format_inference_prompt(review), max_new_tokens
+            )
             preds.append(lbl)
             times.append(t)
             mems.append(m)
 
+        # metrics
         accuracy = np.mean(np.array(preds) == np.array(labels))
         f1 = f1_score(labels, preds)
         throughput = len(reviews) / sum(times)
@@ -152,7 +149,7 @@ def evaluate_one(spec, reviews, labels, cfg):
             "param_mem_mb": param_mem_mb
         })
 
-        # Cleanup
+        # cleanup
         del model, tokenizer
         gc.collect()
         torch.cuda.empty_cache()
@@ -163,23 +160,38 @@ def main():
     cfg = load_config()
     specs = make_model_specs(cfg)
 
-    # Loads a test CSV if provided, else defaults to IMDb test
+    # load test set or CSV
     if cfg.get("test_file") and os.path.exists(cfg["test_file"]):
         df = pd.read_csv(cfg["test_file"])
-        reviews = df["text"].tolist()
-        labels  = df["label"].tolist()
+        reviews, labels = df["text"].tolist(), df["label"].tolist()
     else:
         ds = load_dataset("imdb", split="test")
-        reviews = ds["text"]
-        labels  = ds["label"]
+        reviews, labels = ds["text"], ds["label"]
 
-    all_rows = []
+    out_csv = "results.csv"
+    # remove existing file so we can write headers fresh
+    if os.path.exists(out_csv):
+        os.remove(out_csv)
+
     for spec in specs:
         print(f">>> Evaluating {spec['model_name']} ({spec['quant']}) …")
-        all_rows.extend(evaluate_one(spec, reviews, labels, cfg))
+        try:
+            rows = evaluate_one(spec, reviews, labels, cfg)
+        except Exception as e:
+            print(f"[!] ERROR evaluating {spec['model_name']}: {e}")
+            continue
 
-    pd.DataFrame(all_rows).to_csv("results.csv", index=False)
-    print("✅ Saved results.csv")
+        # append this model’s rows to CSV
+        df_rows = pd.DataFrame(rows)
+        df_rows.to_csv(
+            out_csv,
+            mode="a",
+            index=False,
+            header=not os.path.exists(out_csv) or os.path.getsize(out_csv) == 0
+        )
+        print(f"[✓] Appended {len(rows)} rows for {spec['model_name']}")
+
+    print("✅ All done. Results in", out_csv)
 
 if __name__ == "__main__":
     main()

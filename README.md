@@ -66,6 +66,17 @@ Create or edit `inference-config.json` with the experiment settings. Example:
    python3 evaluate_models.py
    ```
 
+   or
+
+   ```
+   nohup python3 evaluate_models.py > evaluate_models.out 2>&1 &
+   ```
+  and monitor with
+
+  ```
+  tail -f evaluate_models.out
+  ```
+
 4. When complete, a `results.csv` will be generated with one summary row per model × repetition (21 specs × n_reps rows).
 
 ---

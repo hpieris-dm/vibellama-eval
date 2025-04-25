@@ -149,7 +149,7 @@ def evaluate_one(spec, reviews, labels, cfg):
 
     for rep in range(1, n_reps+1):
         # load
-        model, tokenizer = load_causal_model(spec["model_name"], spec["quant"])
+        model, tokenizer = load_causal_model(spec["model_name"], spec["quant"], spec["seed"])
 
         # param footprint
         param_count = sum(p.numel() for p in model.parameters())

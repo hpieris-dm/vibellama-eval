@@ -3,8 +3,7 @@
 evaluate_models.py
 
 Generative inference using SFT-tuned causal Llama models,
-measuring accuracy, performance, and resource usage,
-with the exact same chat-prompt format you used in training.
+measuring accuracy, performance, and resource usage.
 Outputs an incremental CSV for statistical analysis.
 """
 
@@ -19,6 +18,7 @@ import numpy as np
 from tqdm.auto import tqdm
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from peft import PeftModel
 from sklearn.metrics import f1_score
 
 def load_config(path="inference-config.json"):
@@ -59,29 +59,70 @@ def make_model_specs(cfg):
         specs.append({"model_name": base_id, "size": size, "seed": None, "quant": "4bit"})
     return specs
 
-def load_causal_model(model_name, quant):
-    if quant == "4bit":
-        bnb = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_compute_dtype=torch.float16
-        )
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name, device_map="auto", quantization_config=bnb
-        )
-    elif quant == "bf16":
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            device_map="auto",
-            torch_dtype=torch.bfloat16
-        )
+def load_causal_model(model_name, quant, seed):
+    """
+    - If seed is not None, model_name is the adapter repo: load base + attach adapter.
+    - If seed is None, model_name is the full base checkpoint.
+    """
+    # 1) Base loading path
+    if seed is None:
+        # Base model only
+        if quant == "4bit":
+            bnb = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_compute_dtype=torch.float16
+            )
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name, device_map="auto", quantization_config=bnb
+            )
+        elif quant == "bf16":
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name, device_map="auto", torch_dtype=torch.bfloat16
+            )
+        else:
+            raise ValueError(f"Unknown quant mode for base model: {quant}")
+
+        tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+
     else:
-        raise ValueError(f"Unknown quant mode: {quant}")
-    
-    tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+        # Adapter path: parse base_id from model_name
+        size = int(model_name.split("-")[1][:-1])  # e.g. "3b"→3
+        if size == 11:
+            base_id = "meta-llama/Llama-3.2-11B-Vision-Instruct"
+        else:
+            base_id = f"meta-llama/Llama-3.2-{size}B-Instruct"
+
+        # 2a) Load base model in the right precision/quant
+        if quant == "4bit":
+            bnb = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_compute_dtype=torch.float16
+            )
+            base_model = AutoModelForCausalLM.from_pretrained(
+                base_id, device_map="auto", quantization_config=bnb
+            )
+        elif quant == "bf16":
+            base_model = AutoModelForCausalLM.from_pretrained(
+                base_id, device_map="auto", torch_dtype=torch.bfloat16
+            )
+        else:
+            raise ValueError(f"Unknown quant mode for adapter model: {quant}")
+
+        # 2b) Attach the LoRA adapter
+        model = PeftModel.from_pretrained(
+            base_model,
+            model_name,       # this is the adapter repo
+            device_map="auto"
+        )
+        tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+
     model.eval()
     return model, tokenizer
+
 
 def get_sentiment_prediction(model, tokenizer, prompt, max_new_tokens=50):
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)

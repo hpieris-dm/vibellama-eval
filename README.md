@@ -1,6 +1,6 @@
 # VibeLlama Model Evaluation
 
-This repository contains scripts and configuration for evaluating the fine-tuned and base Llama-3.2 models on sentiment analysis. It runs generative inference (via `model.generate()`) using the exact chat‐prompt format you trained on, measures accuracy, latency, throughput, and resource usage, and outputs a tidy CSV for downstream statistical analysis.
+This repository contains scripts and configuration for evaluating the fine-tuned and base Llama-3.2 models on sentiment analysis. It runs generative inference (via `model.generate()`) using the same chat‐prompt format as used in training. Measures accuracy, latency, throughput, and resource usage, and outputs a tidy CSV for downstream statistical analysis.
 
 ---
 

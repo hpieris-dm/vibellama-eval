@@ -126,21 +126,31 @@ def load_causal_model(model_name, quant, seed):
 
 
 def get_sentiment_prediction(model, tokenizer, prompt, max_new_tokens=50):
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    inputs = tokenizer(prompt, return_tensors="pt")
+    input_ids = inputs["input_ids"].to(model.device)
+
     torch.cuda.reset_peak_memory_stats(model.device)
     t0 = time.perf_counter()
     with torch.no_grad():
-        out = model.generate(
-            **inputs,
+        generation_output = model.generate(
+            input_ids=input_ids,
             max_new_tokens=max_new_tokens,
             do_sample=False,
-            pad_token_id=tokenizer.eos_token_id
+            pad_token_id=tokenizer.eos_token_id,
         )
     t1 = time.perf_counter()
-    response = tokenizer.decode(out[0], skip_special_tokens=True)
+
+    gen_ids = generation_output[0, input_ids.shape[-1]:]
+
+    response = tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
+
     mem = torch.cuda.max_memory_reserved(model.device) / 1024**2
-    lbl = 1 if "positive" in response.lower() else 0
-    return lbl, t1 - t0, response, mem
+    latency = t1 - t0
+
+    lbl = 1 if response.lower().startswith("positive") else 0
+
+    return lbl, latency, response, mem
+
 
 def evaluate_one(spec, reviews, labels, cfg):
     n_reps = cfg.get("n_reps", 3)

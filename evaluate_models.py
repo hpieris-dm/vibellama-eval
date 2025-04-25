@@ -20,6 +20,7 @@ from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from peft import PeftModel
 from sklearn.metrics import f1_score
+from sklearn.model_selection import train_test_split
 
 def load_config(path="inference-config.json"):
     with open(path) as f:
@@ -207,7 +208,17 @@ def main():
         reviews, labels = df["text"].tolist(), df["label"].tolist()
     else:
         ds = load_dataset("imdb", split="test")
-        reviews, labels = ds["text"], ds["label"]
+        reviews = ds["text"]
+        labels  = ds["label"]
+
+        # stratified subsample
+        sub_n = cfg.get("subsample_n", 2500)
+        reviews, _, labels, _ = train_test_split(
+            reviews, labels,
+            stratify=labels,
+            train_size=sub_n,
+            random_state=cfg.get("seed", 42)
+        )
 
     out_csv = "results.csv"
     # remove existing file so we can write headers fresh
